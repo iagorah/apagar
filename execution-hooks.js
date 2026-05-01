@@ -34,6 +34,29 @@ async function logToSupabase(data) {
   }
 }
 
+// 🔥 FUNÇÃO RECURSIVA PARA ENCONTRAR TOKEN USAGE EM QUALQUER NÍVEL DO JSON
+function findTokenUsage(obj) {
+  if (!obj || typeof obj !== "object") return null;
+
+  // caso direto
+  if (obj.tokenUsage || obj.usage) {
+    return obj.tokenUsage || obj.usage;
+  }
+
+  // formato comum OpenAI / LangChain
+  if (obj.totalTokens || obj.promptTokens || obj.completionTokens) {
+    return obj;
+  }
+
+  // busca profunda
+  for (const key in obj) {
+    const result = findTokenUsage(obj[key]);
+    if (result) return result;
+  }
+
+  return null;
+}
+
 module.exports = {
   n8n: {
     ready: [
@@ -47,32 +70,37 @@ module.exports = {
       },
     ],
   },
+
   workflow: {
     activate: [
       async function (updatedWorkflow) {
         console.log("[HOOK] workflow.activate:", updatedWorkflow?.id || updatedWorkflow?.name);
       },
     ],
+
     create: [
       async function (createdWorkflow) {
         console.log("[HOOK] workflow.create:", createdWorkflow?.id || createdWorkflow?.name);
       },
     ],
+
     update: [
       async function (updatedWorkflow) {
         console.log("[HOOK] workflow.update:", updatedWorkflow?.id || updatedWorkflow?.name);
       },
     ],
+
     preExecute: [
       async function (workflow, mode) {
         console.log("[HOOK] workflow.preExecute:", workflow?.name, "mode:", mode);
       },
     ],
+
     postExecute: [
       async function (fullRunData, workflowData, executionId) {
         const resultData = fullRunData?.data?.resultData?.runData || {};
 
-        // Calculate duration
+        // duração
         const startedAt = fullRunData?.startedAt;
         const stoppedAt = fullRunData?.stoppedAt;
         const durationMs =
@@ -80,32 +108,37 @@ module.exports = {
             ? new Date(stoppedAt).getTime() - new Date(startedAt).getTime()
             : null;
 
-        // Detect AI usage + aggregate tokens
         let hasAI = false;
         let totalTokens = 0;
         let promptTokens = 0;
         let completionTokens = 0;
 
         for (const [nodeName, nodeRuns] of Object.entries(resultData)) {
-          if (nodeName.toLowerCase().includes("ai")) {
+          const nodeInfo = workflowData.nodes?.find(n => n.name === nodeName);
+
+          // detecta nós de IA de forma mais ampla
+          if (
+            nodeInfo?.type?.toLowerCase().includes("openai") ||
+            nodeInfo?.type?.toLowerCase().includes("langchain") ||
+            nodeInfo?.type?.toLowerCase().includes("ai") ||
+            nodeName.toLowerCase().includes("ai")
+          ) {
             hasAI = true;
 
             for (const run of nodeRuns) {
-              const usage =
-                run?.data?.tokenUsage ||
-                run?.data?.metadata?.tokenUsage ||
-                run?.data?.additionalData?.usage;
+              const usage = findTokenUsage(run);
 
               if (usage) {
                 totalTokens += usage.totalTokens || usage.total_tokens || 0;
                 promptTokens += usage.promptTokens || usage.prompt_tokens || 0;
                 completionTokens += usage.completionTokens || usage.completion_tokens || 0;
+
+                console.log("[HOOK] USAGE FOUND:", usage);
               }
             }
           }
         }
 
-        // Prepare log data for Supabase
         const logData = {
           execution_id: executionId,
           workflow_id: workflowData?.id,
@@ -123,14 +156,13 @@ module.exports = {
 
           error_message: fullRunData?.data?.resultData?.error?.message || null,
 
-          // AI metrics
+          // métricas IA
           has_ai: hasAI,
           total_tokens: totalTokens,
           prompt_tokens: promptTokens,
           completion_tokens: completionTokens,
         };
 
-        // Log to console (resumo)
         console.log(
           "[HOOK] workflow.postExecute:",
           JSON.stringify(
@@ -142,13 +174,14 @@ module.exports = {
               nodeCount: logData.node_count,
               hasAI,
               totalTokens,
+              promptTokens,
+              completionTokens,
             },
             null,
             2
           )
         );
 
-        // Send to Supabase
         await logToSupabase(logData);
       },
     ],
