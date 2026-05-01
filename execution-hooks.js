@@ -34,27 +34,38 @@ async function logToSupabase(data) {
   }
 }
 
-// 🔥 FUNÇÃO RECURSIVA PARA ENCONTRAR TOKEN USAGE EM QUALQUER NÍVEL DO JSON
-function findTokenUsage(obj) {
-  if (!obj || typeof obj !== "object") return null;
+// Busca e soma TODOS os tokens em qualquer nível
+function extractTokenUsage(obj, totals = {
+  totalTokens: 0,
+  promptTokens: 0,
+  completionTokens: 0
+}) {
+  if (!obj || typeof obj !== "object") return totals;
 
-  // caso direto
-  if (obj.tokenUsage || obj.usage) {
-    return obj.tokenUsage || obj.usage;
+  if (obj.tokenUsage && typeof obj.tokenUsage === "object") {
+    totals.totalTokens += Number(obj.tokenUsage.totalTokens || obj.tokenUsage.total_tokens || 0);
+    totals.promptTokens += Number(obj.tokenUsage.promptTokens || obj.tokenUsage.prompt_tokens || 0);
+    totals.completionTokens += Number(obj.tokenUsage.completionTokens || obj.tokenUsage.completion_tokens || 0);
   }
 
-  // formato comum OpenAI / LangChain
-  if (obj.totalTokens || obj.promptTokens || obj.completionTokens) {
-    return obj;
+  if (
+    obj.totalTokens !== undefined ||
+    obj.promptTokens !== undefined ||
+    obj.completionTokens !== undefined ||
+    obj.total_tokens !== undefined ||
+    obj.prompt_tokens !== undefined ||
+    obj.completion_tokens !== undefined
+  ) {
+    totals.totalTokens += Number(obj.totalTokens || obj.total_tokens || 0);
+    totals.promptTokens += Number(obj.promptTokens || obj.prompt_tokens || 0);
+    totals.completionTokens += Number(obj.completionTokens || obj.completion_tokens || 0);
   }
 
-  // busca profunda
-  for (const key in obj) {
-    const result = findTokenUsage(obj[key]);
-    if (result) return result;
+  for (const value of Object.values(obj)) {
+    extractTokenUsage(value, totals);
   }
 
-  return null;
+  return totals;
 }
 
 module.exports = {
@@ -65,7 +76,7 @@ module.exports = {
         if (SUPABASE_URL) {
           console.log("[HOOK] Supabase integration enabled");
         } else {
-          console.log("[HOOK] Supabase not configured (set SUPABASE_URL and SUPABASE_SERVICE_KEY)");
+          console.log("[HOOK] Supabase not configured");
         }
       },
     ],
@@ -100,44 +111,21 @@ module.exports = {
       async function (fullRunData, workflowData, executionId) {
         const resultData = fullRunData?.data?.resultData?.runData || {};
 
-        // duração
         const startedAt = fullRunData?.startedAt;
         const stoppedAt = fullRunData?.stoppedAt;
+
         const durationMs =
           startedAt && stoppedAt
             ? new Date(stoppedAt).getTime() - new Date(startedAt).getTime()
             : null;
 
-        let hasAI = false;
-        let totalTokens = 0;
-        let promptTokens = 0;
-        let completionTokens = 0;
+        // varre a execução inteira
+        const tokenStats = extractTokenUsage(fullRunData);
 
-        for (const [nodeName, nodeRuns] of Object.entries(resultData)) {
-          const nodeInfo = workflowData.nodes?.find(n => n.name === nodeName);
-
-          // detecta nós de IA de forma mais ampla
-          if (
-            nodeInfo?.type?.toLowerCase().includes("openai") ||
-            nodeInfo?.type?.toLowerCase().includes("langchain") ||
-            nodeInfo?.type?.toLowerCase().includes("ai") ||
-            nodeName.toLowerCase().includes("ai")
-          ) {
-            hasAI = true;
-
-            for (const run of nodeRuns) {
-              const usage = findTokenUsage(run);
-
-              if (usage) {
-                totalTokens += usage.totalTokens || usage.total_tokens || 0;
-                promptTokens += usage.promptTokens || usage.prompt_tokens || 0;
-                completionTokens += usage.completionTokens || usage.completion_tokens || 0;
-
-                console.log("[HOOK] USAGE FOUND:", usage);
-              }
-            }
-          }
-        }
+        const hasAI =
+          tokenStats.totalTokens > 0 ||
+          tokenStats.promptTokens > 0 ||
+          tokenStats.completionTokens > 0;
 
         const logData = {
           execution_id: executionId,
@@ -156,11 +144,10 @@ module.exports = {
 
           error_message: fullRunData?.data?.resultData?.error?.message || null,
 
-          // métricas IA
           has_ai: hasAI,
-          total_tokens: totalTokens,
-          prompt_tokens: promptTokens,
-          completion_tokens: completionTokens,
+          total_tokens: tokenStats.totalTokens,
+          prompt_tokens: tokenStats.promptTokens,
+          completion_tokens: tokenStats.completionTokens,
         };
 
         console.log(
@@ -171,11 +158,10 @@ module.exports = {
               workflowName: workflowData?.name,
               status: logData.status,
               durationMs,
-              nodeCount: logData.node_count,
               hasAI,
-              totalTokens,
-              promptTokens,
-              completionTokens,
+              totalTokens: tokenStats.totalTokens,
+              promptTokens: tokenStats.promptTokens,
+              completionTokens: tokenStats.completionTokens,
             },
             null,
             2
