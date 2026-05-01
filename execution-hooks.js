@@ -1,8 +1,13 @@
 console.log("[HOOK FILE] execution-hooks.js loaded at:", new Date().toISOString());
 
-// Supabase configuration from environment variables
+// Supabase configuration
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+
+// Nodes que devem ser ignorados na análise
+const IGNORED_NODE_TYPES = [
+  "n8n-nodes-base.n8n"
+];
 
 // Helper function to insert execution log into Supabase
 async function logToSupabase(data) {
@@ -34,7 +39,7 @@ async function logToSupabase(data) {
   }
 }
 
-// Busca e soma TODOS os tokens em qualquer nível
+// Extrai e soma tokens recursivamente
 function extractTokenUsage(obj, totals = {
   totalTokens: 0,
   promptTokens: 0,
@@ -73,6 +78,7 @@ module.exports = {
     ready: [
       async function () {
         console.log("[HOOK] n8n.ready - Server is ready!");
+
         if (SUPABASE_URL) {
           console.log("[HOOK] Supabase integration enabled");
         } else {
@@ -119,8 +125,30 @@ module.exports = {
             ? new Date(stoppedAt).getTime() - new Date(startedAt).getTime()
             : null;
 
-        // varre a execução inteira
-        const tokenStats = extractTokenUsage(fullRunData);
+        let tokenStats = {
+          totalTokens: 0,
+          promptTokens: 0,
+          completionTokens: 0
+        };
+
+        // Analisa node por node
+        for (const [nodeName, nodeRuns] of Object.entries(resultData)) {
+          const nodeInfo = workflowData?.nodes?.find(n => n.name === nodeName);
+
+          if (!nodeInfo) continue;
+
+          // Ignora nodes técnicos
+          if (IGNORED_NODE_TYPES.includes(nodeInfo.type)) {
+            console.log(`[HOOK] Ignorando node técnico: ${nodeName} (${nodeInfo.type})`);
+            continue;
+          }
+
+          const nodeTokens = extractTokenUsage(nodeRuns);
+
+          tokenStats.totalTokens += nodeTokens.totalTokens;
+          tokenStats.promptTokens += nodeTokens.promptTokens;
+          tokenStats.completionTokens += nodeTokens.completionTokens;
+        }
 
         const hasAI =
           tokenStats.totalTokens > 0 ||
@@ -158,6 +186,7 @@ module.exports = {
               workflowName: workflowData?.name,
               status: logData.status,
               durationMs,
+              nodeCount: logData.node_count,
               hasAI,
               totalTokens: tokenStats.totalTokens,
               promptTokens: tokenStats.promptTokens,
