@@ -19,10 +19,12 @@ const IGNORED_NODE_TYPES = ["n8n-nodes-base.n8n"];
  */
 function extractTimeSaved(nodeRuns) {
   let totalMinutes = 0;
+
   if (!Array.isArray(nodeRuns)) return 0;
 
   for (const run of nodeRuns) {
     const minutes = run.metadata?.timeSaved?.minutes;
+
     if (minutes !== undefined) {
       totalMinutes += Number(minutes);
     }
@@ -47,6 +49,12 @@ function extractTokenUsage(obj, totals = {
     totals.completionTokens += Number(obj.tokenUsage.completionTokens || obj.tokenUsage.completion_tokens || 0);
   }
 
+  if (obj.token_usage && typeof obj.token_usage === "object") {
+    totals.totalTokens += Number(obj.token_usage.totalTokens || obj.token_usage.total_tokens || 0);
+    totals.promptTokens += Number(obj.token_usage.promptTokens || obj.token_usage.prompt_tokens || 0);
+    totals.completionTokens += Number(obj.token_usage.completionTokens || obj.token_usage.completion_tokens || 0);
+  }
+
   const total = obj.totalTokens || obj.total_tokens;
   const prompt = obj.promptTokens || obj.prompt_tokens;
   const completion = obj.completionTokens || obj.completion_tokens;
@@ -67,7 +75,7 @@ function extractTokenUsage(obj, totals = {
 }
 
 /**
- * Extrai o modelo de IA recursivamente
+ * Extrai modelo de IA recursivamente
  */
 function extractAiModel(obj) {
   if (!obj || typeof obj !== "object") return null;
@@ -105,6 +113,7 @@ async function logToSupabase(data) {
     if (!response.ok) {
       console.error("[HOOK] Supabase insert failed:", await response.text());
     }
+
   } catch (error) {
     console.error("[HOOK] Supabase error:", error.message);
   }
@@ -130,27 +139,42 @@ module.exports = {
 
         for (const [nodeName, nodeRuns] of Object.entries(resultData)) {
           const nodeInfo = workflowData?.nodes?.find(n => n.name === nodeName);
+
           if (!nodeInfo) continue;
 
           // Minutes saved
           totalMinutesSaved += extractTimeSaved(nodeRuns);
 
-          // Detecta nós de IA
-          const isAiNode = AI_NODE_IDENTIFIERS.some(prefix =>
+          // Detecção tradicional por tipo de nó
+          const matchesKnownAiNode = AI_NODE_IDENTIFIERS.some(prefix =>
             nodeInfo.type.startsWith(prefix)
           );
 
-          if (isAiNode && !IGNORED_NODE_TYPES.includes(nodeInfo.type)) {
+          // Detecção por payload
+          const detectedModel = extractAiModel(nodeRuns);
+          const detectedTokens = extractTokenUsage(nodeRuns);
+
+          const hasAiPayload =
+            detectedModel &&
+            (
+              detectedTokens.totalTokens > 0 ||
+              detectedTokens.promptTokens > 0 ||
+              detectedTokens.completionTokens > 0
+            );
+
+          const isAiNode =
+            (matchesKnownAiNode && !IGNORED_NODE_TYPES.includes(nodeInfo.type)) ||
+            hasAiPayload;
+
+          if (isAiNode) {
             aiNodeFound = true;
 
-            const nodeTokens = extractTokenUsage(nodeRuns);
+            tokenStats.totalTokens += detectedTokens.totalTokens;
+            tokenStats.promptTokens += detectedTokens.promptTokens;
+            tokenStats.completionTokens += detectedTokens.completionTokens;
 
-            tokenStats.totalTokens += nodeTokens.totalTokens;
-            tokenStats.promptTokens += nodeTokens.promptTokens;
-            tokenStats.completionTokens += nodeTokens.completionTokens;
-
-            if (!aiModel) {
-              aiModel = extractAiModel(nodeRuns);
+            if (!aiModel && detectedModel) {
+              aiModel = detectedModel;
             }
           }
         }
@@ -159,16 +183,22 @@ module.exports = {
           execution_id: executionId,
           workflow_id: workflowData?.id,
           workflow_name: workflowData?.name,
+
           status: fullRunData?.status || (fullRunData?.finished ? "success" : "error"),
           finished: fullRunData?.finished || false,
+
           started_at: startedAt,
           finished_at: stoppedAt,
+
           duration_ms: startedAt && stoppedAt
             ? new Date(stoppedAt).getTime() - new Date(startedAt).getTime()
             : null,
+
           mode: fullRunData?.mode,
           node_count: Object.keys(resultData).length,
-          error_message: fullRunData?.data?.resultData?.error?.message || null,
+
+          error_message:
+            fullRunData?.data?.resultData?.error?.message || null,
 
           has_ai: aiNodeFound,
           ai_model: aiModel,
@@ -181,7 +211,7 @@ module.exports = {
         };
 
         console.log(
-          `[HOOK] ID ${executionId} | AI: ${aiNodeFound} | Model: ${aiModel} | Minutes Saved: ${logData.minutes_saved}`
+          `[HOOK] ID ${executionId} | AI: ${aiNodeFound} | Model: ${aiModel} | Tokens: ${tokenStats.totalTokens} | Minutes Saved: ${logData.minutes_saved}`
         );
 
         await logToSupabase(logData);
