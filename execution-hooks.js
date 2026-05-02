@@ -1,16 +1,11 @@
-/**
- * n8n External Hooks - PowerOtimiza
- * Captura: Logs, IA (Tokens/Modelos) e Tempo Economizado.
- */
-
 console.log("[HOOK FILE] execution-hooks.js loaded at:", new Date().toISOString());
 
+// Supabase configuration
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
-// Prefixos de nós oficiais de IA[cite: 2, 4]
 const AI_NODE_IDENTIFIERS = [
-  "@n8n/n8n-nodes-langchain", 
+  "@n8n/n8n-nodes-langchain",
   "n8n-nodes-base.openAi",
   "n8n-nodes-base.anthropic",
   "n8n-nodes-base.googlePalm",
@@ -20,57 +15,15 @@ const AI_NODE_IDENTIFIERS = [
 const IGNORED_NODE_TYPES = ["n8n-nodes-base.n8n"];
 
 /**
- * Extração de IA com proteção contra duplicidade[cite: 1, 4]
+ * Extrai o tempo economizado dos metadados do nó
  */
-function extractAiDetails(obj, totals, aiInfo) {
-  if (!obj || typeof obj !== "object" || obj === null) return;
-
-  // 1. Suporte para retornos customizados (Exemplo 6)[cite: 5]
-  if (obj.result && obj.result.token_usage) {
-    const usage = obj.result.token_usage;
-    totals.totalTokens += Number(usage.total_tokens || 0);
-    totals.promptTokens += Number(usage.prompt_tokens || 0);
-    totals.completionTokens += Number(usage.completion_tokens || 0);
-    if (obj.result.ai_model) {
-      aiInfo.model = obj.result.ai_model;[cite: 5]
-    }
-    return; 
-  }
-
-  // 2. Suporte para nós nativos (tokenUsage)[cite: 2, 4]
-  if (obj.tokenUsage && typeof obj.tokenUsage === "object") {
-    totals.totalTokens += Number(obj.tokenUsage.totalTokens || obj.tokenUsage.total_tokens || 0);
-    totals.promptTokens += Number(obj.tokenUsage.promptTokens || obj.tokenUsage.prompt_tokens || 0);
-    totals.completionTokens += Number(obj.tokenUsage.completionTokens || obj.tokenUsage.completion_tokens || 0);
-    return;
-  }
-
-  // 3. Captura do nome do modelo[cite: 4]
-  if (obj.model || obj.modelName) {
-    aiInfo.model = obj.model || obj.modelName;
-  }
-
-  // Recursão protegida
-  for (const key in obj) {
-    if (Object.prototype.hasOwnProperty.call(obj, key)) {
-      const value = obj[key];
-      if (typeof value === "object" && value !== null) {
-        extractAiDetails(value, totals, aiInfo);
-      }
-    }
-  }
-}
-
-/**
- * Captura tempo economizado (metadata)[cite: 3]
- */
-function extractMinutesSaved(nodeRuns) {
+function extractTimeSaved(nodeRuns) {
   let totalMinutes = 0;
   if (!Array.isArray(nodeRuns)) return 0;
 
-  for (let i = 0; i < nodeRuns.length; i++) {
-    const run = nodeRuns[i];
-    const minutes = (run.metadata && run.metadata.timeSaved) ? run.metadata.timeSaved.minutes : undefined;[cite: 3]
+  for (const run of nodeRuns) {
+    // No exemplo, o dado está em metadata.timeSaved.minutes[cite: 3]
+    const minutes = run.metadata?.timeSaved?.minutes;
     if (minutes !== undefined) {
       totalMinutes += Number(minutes);
     }
@@ -78,25 +31,48 @@ function extractMinutesSaved(nodeRuns) {
   return totalMinutes;
 }
 
+function extractTokenUsage(obj, totals = { totalTokens: 0, promptTokens: 0, completionTokens: 0 }) {
+  if (!obj || typeof obj !== "object") return totals;
+
+  if (obj.tokenUsage && typeof obj.tokenUsage === "object") {
+    totals.totalTokens += Number(obj.tokenUsage.totalTokens || obj.tokenUsage.total_tokens || 0);
+    totals.promptTokens += Number(obj.tokenUsage.promptTokens || obj.tokenUsage.prompt_tokens || 0);
+    totals.completionTokens += Number(obj.tokenUsage.completionTokens || obj.tokenUsage.completion_tokens || 0);
+  }
+
+  const total = obj.totalTokens || obj.total_tokens;
+  const prompt = obj.promptTokens || obj.prompt_tokens;
+  const completion = obj.completionTokens || obj.completion_tokens;
+
+  if (total !== undefined || prompt !== undefined || completion !== undefined) {
+    totals.totalTokens += Number(total || 0);
+    totals.promptTokens += Number(prompt || 0);
+    totals.completionTokens += Number(completion || 0);
+  }
+
+  for (const value of Object.values(obj)) {
+    if (typeof value === "object") extractTokenUsage(value, totals);
+  }
+
+  return totals;
+}
+
 async function logToSupabase(data) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
   try {
-    const response = await fetch(SUPABASE_URL + "/rest/v1/n8n_execution_logs", {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/n8n_execution_logs`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "apikey": SUPABASE_SERVICE_KEY,
-        "Authorization": "Bearer " + SUPABASE_SERVICE_KEY,
-        "Prefer": "return=minimal"
+        "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
+        "Prefer": "return=minimal",
       },
-      body: JSON.stringify(data)
+      body: JSON.stringify(data),
     });
-    if (!response.ok) {
-      const err = await response.text();
-      console.error("[HOOK] Supabase Error:", err);
-    }
+    if (!response.ok) console.error("[HOOK] Supabase insert failed:", await response.text());
   } catch (error) {
-    console.error("[HOOK] Fetch Error:", error.message);
+    console.error("[HOOK] Supabase error:", error.message);
   }
 }
 
@@ -104,61 +80,57 @@ module.exports = {
   workflow: {
     postExecute: [
       async function (fullRunData, workflowData, executionId) {
-        try {
-          const runData = (fullRunData.data && fullRunData.data.resultData) ? fullRunData.data.resultData.runData || {} : {};
-          const startedAt = fullRunData.startedAt;
-          const stoppedAt = fullRunData.stoppedAt;
+        const resultData = fullRunData?.data?.resultData?.runData || {};
+        const startedAt = fullRunData?.startedAt;
+        const stoppedAt = fullRunData?.stoppedAt;
 
-          let tokenStats = { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
-          let aiInfo = { model: "N/A" };
-          let totalMinutesSaved = 0;
-          let aiNodeFound = false;
+        let tokenStats = { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
+        let totalMinutesSaved = 0;
+        let aiNodeFound = false;
 
-          for (const nodeName in runData) {
-            const nodeRuns = runData[nodeName];
-            const nodeInfo = (workflowData.nodes) ? workflowData.nodes.find(function(n) { return n.name === nodeName; }) : null;
-            if (!nodeInfo) continue;
+        for (const [nodeName, nodeRuns] of Object.entries(resultData)) {
+          const nodeInfo = workflowData?.nodes?.find(n => n.name === nodeName);
+          if (!nodeInfo) continue;
 
-            // Minutes Saved[cite: 3, 5]
-            totalMinutesSaved += extractMinutesSaved(nodeRuns);
+          // 1. Captura Minutes Saved (Independente de ser IA ou não)[cite: 3]
+          totalMinutesSaved += extractTimeSaved(nodeRuns);
 
-            // Detecção de IA
-            const isAiNode = AI_NODE_IDENTIFIERS.some(function(p) { return nodeInfo.type.startsWith(p); }) || 
-                             nodeName.includes("TTS") || 
-                             nodeName.includes("AI Agent");
-
-            if (isAiNode && !IGNORED_NODE_TYPES.includes(nodeInfo.type)) {
-              aiNodeFound = true;
-              extractAiDetails(nodeRuns, tokenStats, aiInfo);
-            }
+          // 2. Captura Tokens (Apenas se for nó de IA)
+          const isAiNode = AI_NODE_IDENTIFIERS.some(prefix => nodeInfo.type.startsWith(prefix));
+          if (isAiNode && !IGNORED_NODE_TYPES.includes(nodeInfo.type)) {
+            aiNodeFound = true;
+            const nodeTokens = extractTokenUsage(nodeRuns);
+            tokenStats.totalTokens += nodeTokens.totalTokens;
+            tokenStats.promptTokens += nodeTokens.promptTokens;
+            tokenStats.completionTokens += nodeTokens.completionTokens;
           }
-
-          const logData = {
-            execution_id: executionId,
-            workflow_id: workflowData.id,
-            workflow_name: workflowData.name,
-            status: fullRunData.status || (fullRunData.finished ? "success" : "error"),
-            finished: fullRunData.finished || false,
-            started_at: startedAt,
-            finished_at: stoppedAt,
-            duration_ms: (startedAt && stoppedAt) ? (new Date(stoppedAt).getTime() - new Date(startedAt).getTime()) : null,
-            mode: fullRunData.mode,
-            node_count: Object.keys(runData).length,
-            error_message: (fullRunData.data && fullRunData.data.resultData && fullRunData.data.resultData.error) ? fullRunData.data.resultData.error.message : null,
-            has_ai: aiNodeFound,
-            ai_model: aiInfo.model,
-            total_tokens: tokenStats.totalTokens,
-            prompt_tokens: tokenStats.promptTokens,
-            completion_tokens: tokenStats.completionTokens,
-            minutes_saved: Math.round(totalMinutesSaved)
-          };
-
-          console.log("[HOOK] Success: " + executionId + " | Tokens: " + logData.total_tokens);
-          await logToSupabase(logData);
-        } catch (e) {
-          console.error("[HOOK] Critical Failure:", e.message);
         }
-      }
-    ]
-  }
+
+        const logData = {
+          execution_id: executionId,
+          workflow_id: workflowData?.id,
+          workflow_name: workflowData?.name,
+          status: fullRunData?.status || (fullRunData?.finished ? "success" : "error"),
+          finished: fullRunData?.finished || false,
+          started_at: startedAt,
+          finished_at: stoppedAt,
+          duration_ms: startedAt && stoppedAt ? new Date(stoppedAt).getTime() - new Date(startedAt).getTime() : null,
+          mode: fullRunData?.mode,
+          node_count: Object.keys(resultData).length,
+          error_message: fullRunData?.data?.resultData?.error?.message || null,
+          
+          has_ai: aiNodeFound,
+          total_tokens: tokenStats.totalTokens,
+          prompt_tokens: tokenStats.promptTokens,
+          completion_tokens: tokenStats.completionTokens,
+
+          // Novo campo: Minutes Saved arredondado para inteiro[cite: 3]
+          minutes_saved: Math.round(totalMinutesSaved)
+        };
+
+        console.log(`[HOOK] ID ${executionId} | Minutes Saved: ${logData.minutes_saved} | AI: ${aiNodeFound}`);
+        await logToSupabase(logData);
+      },
+    ],
+  },
 };
