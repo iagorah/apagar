@@ -34,25 +34,41 @@ function extractTimeSaved(nodeRuns) {
 }
 
 /**
- * Extrai uso de tokens recursivamente
+ * Extrai tokens com deduplicação
  */
-function extractTokenUsage(obj, totals = {
-  totalTokens: 0,
-  promptTokens: 0,
-  completionTokens: 0
-}) {
+function extractTokenUsage(
+  obj,
+  totals = {
+    totalTokens: 0,
+    promptTokens: 0,
+    completionTokens: 0
+  },
+  seen = new Set()
+) {
   if (!obj || typeof obj !== "object") return totals;
 
+  let tokenBlock = null;
+
   if (obj.tokenUsage && typeof obj.tokenUsage === "object") {
-    totals.totalTokens += Number(obj.tokenUsage.totalTokens || obj.tokenUsage.total_tokens || 0);
-    totals.promptTokens += Number(obj.tokenUsage.promptTokens || obj.tokenUsage.prompt_tokens || 0);
-    totals.completionTokens += Number(obj.tokenUsage.completionTokens || obj.tokenUsage.completion_tokens || 0);
+    tokenBlock = obj.tokenUsage;
+  } else if (obj.token_usage && typeof obj.token_usage === "object") {
+    tokenBlock = obj.token_usage;
   }
 
-  if (obj.token_usage && typeof obj.token_usage === "object") {
-    totals.totalTokens += Number(obj.token_usage.totalTokens || obj.token_usage.total_tokens || 0);
-    totals.promptTokens += Number(obj.token_usage.promptTokens || obj.token_usage.prompt_tokens || 0);
-    totals.completionTokens += Number(obj.token_usage.completionTokens || obj.token_usage.completion_tokens || 0);
+  if (tokenBlock) {
+    const total = Number(tokenBlock.totalTokens || tokenBlock.total_tokens || 0);
+    const prompt = Number(tokenBlock.promptTokens || tokenBlock.prompt_tokens || 0);
+    const completion = Number(tokenBlock.completionTokens || tokenBlock.completion_tokens || 0);
+
+    const signature = `${total}-${prompt}-${completion}`;
+
+    if (!seen.has(signature)) {
+      seen.add(signature);
+
+      totals.totalTokens += total;
+      totals.promptTokens += prompt;
+      totals.completionTokens += completion;
+    }
   }
 
   const total = obj.totalTokens || obj.total_tokens;
@@ -60,14 +76,24 @@ function extractTokenUsage(obj, totals = {
   const completion = obj.completionTokens || obj.completion_tokens;
 
   if (total !== undefined || prompt !== undefined || completion !== undefined) {
-    totals.totalTokens += Number(total || 0);
-    totals.promptTokens += Number(prompt || 0);
-    totals.completionTokens += Number(completion || 0);
+    const t = Number(total || 0);
+    const p = Number(prompt || 0);
+    const c = Number(completion || 0);
+
+    const signature = `${t}-${p}-${c}`;
+
+    if (!seen.has(signature)) {
+      seen.add(signature);
+
+      totals.totalTokens += t;
+      totals.promptTokens += p;
+      totals.completionTokens += c;
+    }
   }
 
   for (const value of Object.values(obj)) {
     if (typeof value === "object") {
-      extractTokenUsage(value, totals);
+      extractTokenUsage(value, totals, seen);
     }
   }
 
@@ -75,7 +101,7 @@ function extractTokenUsage(obj, totals = {
 }
 
 /**
- * Extrai modelo de IA recursivamente
+ * Extrai modelo
  */
 function extractAiModel(obj) {
   if (!obj || typeof obj !== "object") return null;
@@ -113,7 +139,6 @@ async function logToSupabase(data) {
     if (!response.ok) {
       console.error("[HOOK] Supabase insert failed:", await response.text());
     }
-
   } catch (error) {
     console.error("[HOOK] Supabase error:", error.message);
   }
@@ -142,15 +167,12 @@ module.exports = {
 
           if (!nodeInfo) continue;
 
-          // Minutes saved
           totalMinutesSaved += extractTimeSaved(nodeRuns);
 
-          // Detecção tradicional por tipo de nó
           const matchesKnownAiNode = AI_NODE_IDENTIFIERS.some(prefix =>
             nodeInfo.type.startsWith(prefix)
           );
 
-          // Detecção por payload
           const detectedModel = extractAiModel(nodeRuns);
           const detectedTokens = extractTokenUsage(nodeRuns);
 
