@@ -65,14 +65,17 @@ async function logToSupabase(data) {
 function extractTokenUsage(obj, totals = { totalTokens: 0, promptTokens: 0, completionTokens: 0 }) {
   if (!obj || typeof obj !== "object") return totals;
 
-  // Tenta capturar do padrão tokenUsage (LangChain/AI Agent)[cite: 2]
+  // 1. Se encontrar o objeto estruturado, processa e para a descida neste ramo
   if (obj.tokenUsage && typeof obj.tokenUsage === "object") {
     totals.totalTokens += Number(obj.tokenUsage.totalTokens || obj.tokenUsage.total_tokens || 0);
     totals.promptTokens += Number(obj.tokenUsage.promptTokens || obj.tokenUsage.prompt_tokens || 0);
     totals.completionTokens += Number(obj.tokenUsage.completionTokens || obj.tokenUsage.completion_tokens || 0);
+    
+    // IMPORTANTE: Retornamos aqui para não re-processar os campos individuais dentro do próprio tokenUsage
+    return totals; 
   }
 
-  // Tenta capturar de campos soltos (OpenAI legado ou respostas diretas)
+  // 2. Se não tem tokenUsage, mas tem os campos soltos no nível atual
   const total = obj.totalTokens || obj.total_tokens;
   const prompt = obj.promptTokens || obj.prompt_tokens;
   const completion = obj.completionTokens || obj.completion_tokens;
@@ -81,11 +84,15 @@ function extractTokenUsage(obj, totals = { totalTokens: 0, promptTokens: 0, comp
     totals.totalTokens += Number(total || 0);
     totals.promptTokens += Number(prompt || 0);
     totals.completionTokens += Number(completion || 0);
+    // Também paramos aqui para evitar duplicidade em campos aninhados idênticos
+    return totals;
   }
 
-  // Recursão para garantir que pegamos tokens de todas as sub-execuções/itens
+  // 3. Continua a busca nos filhos (apenas se não encontrou nada no nível atual)
   for (const value of Object.values(obj)) {
-    if (typeof value === "object") extractTokenUsage(value, totals);
+    if (typeof value === "object") {
+      extractTokenUsage(value, totals);
+    }
   }
 
   return totals;
