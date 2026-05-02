@@ -21,6 +21,23 @@ const IGNORED_NODE_TYPES = [
   "n8n-nodes-base.n8n"
 ];
 
+/**
+ * Extrai o tempo economizado dos metadados do nó
+ */
+function extractTimeSaved(nodeRuns) {
+  let totalMinutes = 0;
+  if (!Array.isArray(nodeRuns)) return 0;
+
+  for (const run of nodeRuns) {
+    // No exemplo, o dado está em metadata.timeSaved.minutes[cite: 3]
+    const minutes = run.metadata?.timeSaved?.minutes;
+    if (minutes !== undefined) {
+      totalMinutes += Number(minutes);
+    }
+  }
+  return totalMinutes;
+}
+
 async function logToSupabase(data) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
 
@@ -83,6 +100,7 @@ module.exports = {
         const stoppedAt = fullRunData?.stoppedAt;
 
         let tokenStats = { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
+        let totalMinutesSaved = 0;
         let aiNodeFound = false;
 
         // Analisa cada nó executado no workflow
@@ -90,7 +108,10 @@ module.exports = {
           const nodeInfo = workflowData?.nodes?.find(n => n.name === nodeName);
           if (!nodeInfo) continue;
 
-          // Validação: O nó é um nó de IA oficial?[cite: 2]
+          // Captura Minutes Saved (Independente de ser IA ou não)
+          totalMinutesSaved += extractTimeSaved(nodeRuns);
+          
+          // Validação: O nó é um nó de IA oficial?
           const isAiNode = AI_NODE_IDENTIFIERS.some(prefix => nodeInfo.type.startsWith(prefix));
           
           // Se não for nó de IA e não estiver na lista de ignorados, pulamos a extração de tokens
@@ -124,6 +145,8 @@ module.exports = {
           total_tokens: tokenStats.totalTokens,
           prompt_tokens: tokenStats.promptTokens,
           completion_tokens: tokenStats.completionTokens,
+          
+          minutes_saved: Math.round(totalMinutesSaved),
         };
 
         console.log(`[HOOK] Post-Execute ID ${executionId} | AI: ${aiNodeFound} | Tokens: ${tokenStats.totalTokens}`);
