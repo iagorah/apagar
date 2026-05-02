@@ -32,13 +32,9 @@ function extractTimeSaved(nodeRuns) {
 }
 
 /**
- * Extrai tokens deduplicando por totalTokens
+ * Coleta tokens únicos globalmente
  */
-function extractTokenUsage(
-  obj,
-  totals,
-  seenTotals
-) {
+function collectUniqueTokens(obj, tokenMap) {
   if (!obj || typeof obj !== "object") return;
 
   let tokenBlock = null;
@@ -54,20 +50,40 @@ function extractTokenUsage(
     const prompt = Number(tokenBlock.promptTokens || tokenBlock.prompt_tokens || 0);
     const completion = Number(tokenBlock.completionTokens || tokenBlock.completion_tokens || 0);
 
-    if (total > 0 && !seenTotals.has(total)) {
-      seenTotals.add(total);
-
-      totals.totalTokens += total;
-      totals.promptTokens += prompt;
-      totals.completionTokens += completion;
+    // chave única = totalTokens
+    if (total > 0 && !tokenMap.has(total)) {
+      tokenMap.set(total, {
+        totalTokens: total,
+        promptTokens: prompt,
+        completionTokens: completion
+      });
     }
   }
 
   for (const value of Object.values(obj)) {
     if (typeof value === "object") {
-      extractTokenUsage(value, totals, seenTotals);
+      collectUniqueTokens(value, tokenMap);
     }
   }
+}
+
+/**
+ * Soma tokens únicos
+ */
+function sumUniqueTokens(tokenMap) {
+  const totals = {
+    totalTokens: 0,
+    promptTokens: 0,
+    completionTokens: 0
+  };
+
+  for (const token of tokenMap.values()) {
+    totals.totalTokens += token.totalTokens;
+    totals.promptTokens += token.promptTokens;
+    totals.completionTokens += token.completionTokens;
+  }
+
+  return totals;
 }
 
 /**
@@ -122,13 +138,7 @@ module.exports = {
         const startedAt = fullRunData?.startedAt;
         const stoppedAt = fullRunData?.stoppedAt;
 
-        let tokenStats = {
-          totalTokens: 0,
-          promptTokens: 0,
-          completionTokens: 0
-        };
-
-        const seenTotals = new Set();
+        const uniqueTokenMap = new Map();
 
         let totalMinutesSaved = 0;
         let aiNodeFound = false;
@@ -146,17 +156,11 @@ module.exports = {
 
           const detectedModel = extractAiModel(nodeRuns);
 
-          const nodeTokens = {
-            totalTokens: 0,
-            promptTokens: 0,
-            completionTokens: 0
-          };
-
-          extractTokenUsage(nodeRuns, nodeTokens, seenTotals);
+          // coleta tokens únicos globalmente
+          collectUniqueTokens(nodeRuns, uniqueTokenMap);
 
           const hasAiPayload =
-            detectedModel &&
-            nodeTokens.totalTokens > 0;
+            detectedModel && uniqueTokenMap.size > 0;
 
           const isAiNode =
             (matchesKnownAiNode && !IGNORED_NODE_TYPES.includes(nodeInfo.type)) ||
@@ -165,15 +169,14 @@ module.exports = {
           if (isAiNode) {
             aiNodeFound = true;
 
-            tokenStats.totalTokens += nodeTokens.totalTokens;
-            tokenStats.promptTokens += nodeTokens.promptTokens;
-            tokenStats.completionTokens += nodeTokens.completionTokens;
-
             if (!aiModel && detectedModel) {
               aiModel = detectedModel;
             }
           }
         }
+
+        // soma final única
+        const tokenStats = sumUniqueTokens(uniqueTokenMap);
 
         const logData = {
           execution_id: executionId,
@@ -201,7 +204,7 @@ module.exports = {
         };
 
         console.log(
-          `[HOOK] ID ${executionId} | AI: ${aiNodeFound} | Model: ${aiModel} | Tokens: ${tokenStats.totalTokens}`
+          `[HOOK] ID ${executionId} | AI: ${aiNodeFound} | Model: ${aiModel} | Unique Token Blocks: ${uniqueTokenMap.size} | Tokens: ${tokenStats.totalTokens}`
         );
 
         await logToSupabase(logData);
