@@ -1,6 +1,5 @@
 console.log("[HOOK FILE] execution-hooks.js loaded at:", new Date().toISOString());
 
-// Supabase configuration
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
@@ -24,7 +23,6 @@ function extractTimeSaved(nodeRuns) {
 
   for (const run of nodeRuns) {
     const minutes = run.metadata?.timeSaved?.minutes;
-
     if (minutes !== undefined) {
       totalMinutes += Number(minutes);
     }
@@ -34,18 +32,14 @@ function extractTimeSaved(nodeRuns) {
 }
 
 /**
- * Extrai tokens com deduplicação
+ * Extrai tokens deduplicando por totalTokens
  */
 function extractTokenUsage(
   obj,
-  totals = {
-    totalTokens: 0,
-    promptTokens: 0,
-    completionTokens: 0
-  },
-  seen = new Set()
+  totals,
+  seenTotals
 ) {
-  if (!obj || typeof obj !== "object") return totals;
+  if (!obj || typeof obj !== "object") return;
 
   let tokenBlock = null;
 
@@ -60,10 +54,8 @@ function extractTokenUsage(
     const prompt = Number(tokenBlock.promptTokens || tokenBlock.prompt_tokens || 0);
     const completion = Number(tokenBlock.completionTokens || tokenBlock.completion_tokens || 0);
 
-    const signature = `${total}-${prompt}-${completion}`;
-
-    if (!seen.has(signature)) {
-      seen.add(signature);
+    if (total > 0 && !seenTotals.has(total)) {
+      seenTotals.add(total);
 
       totals.totalTokens += total;
       totals.promptTokens += prompt;
@@ -71,33 +63,11 @@ function extractTokenUsage(
     }
   }
 
-  const total = obj.totalTokens || obj.total_tokens;
-  const prompt = obj.promptTokens || obj.prompt_tokens;
-  const completion = obj.completionTokens || obj.completion_tokens;
-
-  if (total !== undefined || prompt !== undefined || completion !== undefined) {
-    const t = Number(total || 0);
-    const p = Number(prompt || 0);
-    const c = Number(completion || 0);
-
-    const signature = `${t}-${p}-${c}`;
-
-    if (!seen.has(signature)) {
-      seen.add(signature);
-
-      totals.totalTokens += t;
-      totals.promptTokens += p;
-      totals.completionTokens += c;
-    }
-  }
-
   for (const value of Object.values(obj)) {
     if (typeof value === "object") {
-      extractTokenUsage(value, totals, seen);
+      extractTokenUsage(value, totals, seenTotals);
     }
   }
-
-  return totals;
 }
 
 /**
@@ -158,13 +128,14 @@ module.exports = {
           completionTokens: 0
         };
 
+        const seenTotals = new Set();
+
         let totalMinutesSaved = 0;
         let aiNodeFound = false;
         let aiModel = null;
 
         for (const [nodeName, nodeRuns] of Object.entries(resultData)) {
           const nodeInfo = workflowData?.nodes?.find(n => n.name === nodeName);
-
           if (!nodeInfo) continue;
 
           totalMinutesSaved += extractTimeSaved(nodeRuns);
@@ -174,15 +145,18 @@ module.exports = {
           );
 
           const detectedModel = extractAiModel(nodeRuns);
-          const detectedTokens = extractTokenUsage(nodeRuns);
+
+          const nodeTokens = {
+            totalTokens: 0,
+            promptTokens: 0,
+            completionTokens: 0
+          };
+
+          extractTokenUsage(nodeRuns, nodeTokens, seenTotals);
 
           const hasAiPayload =
             detectedModel &&
-            (
-              detectedTokens.totalTokens > 0 ||
-              detectedTokens.promptTokens > 0 ||
-              detectedTokens.completionTokens > 0
-            );
+            nodeTokens.totalTokens > 0;
 
           const isAiNode =
             (matchesKnownAiNode && !IGNORED_NODE_TYPES.includes(nodeInfo.type)) ||
@@ -191,9 +165,9 @@ module.exports = {
           if (isAiNode) {
             aiNodeFound = true;
 
-            tokenStats.totalTokens += detectedTokens.totalTokens;
-            tokenStats.promptTokens += detectedTokens.promptTokens;
-            tokenStats.completionTokens += detectedTokens.completionTokens;
+            tokenStats.totalTokens += nodeTokens.totalTokens;
+            tokenStats.promptTokens += nodeTokens.promptTokens;
+            tokenStats.completionTokens += nodeTokens.completionTokens;
 
             if (!aiModel && detectedModel) {
               aiModel = detectedModel;
@@ -205,22 +179,16 @@ module.exports = {
           execution_id: executionId,
           workflow_id: workflowData?.id,
           workflow_name: workflowData?.name,
-
           status: fullRunData?.status || (fullRunData?.finished ? "success" : "error"),
           finished: fullRunData?.finished || false,
-
           started_at: startedAt,
           finished_at: stoppedAt,
-
           duration_ms: startedAt && stoppedAt
             ? new Date(stoppedAt).getTime() - new Date(startedAt).getTime()
             : null,
-
           mode: fullRunData?.mode,
           node_count: Object.keys(resultData).length,
-
-          error_message:
-            fullRunData?.data?.resultData?.error?.message || null,
+          error_message: fullRunData?.data?.resultData?.error?.message || null,
 
           has_ai: aiNodeFound,
           ai_model: aiModel,
@@ -233,7 +201,7 @@ module.exports = {
         };
 
         console.log(
-          `[HOOK] ID ${executionId} | AI: ${aiNodeFound} | Model: ${aiModel} | Tokens: ${tokenStats.totalTokens} | Minutes Saved: ${logData.minutes_saved}`
+          `[HOOK] ID ${executionId} | AI: ${aiNodeFound} | Model: ${aiModel} | Tokens: ${tokenStats.totalTokens}`
         );
 
         await logToSupabase(logData);
