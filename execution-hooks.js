@@ -105,11 +105,11 @@ function extractTriggerType(fullRunData) {
 
   if (!rawType) return null;
 
-  return rawType
-    .replace(/^n8n-nodes-base\./, "")
-    .replace(/Trigger$/, "")
-    .replace(/trigger$/, "")
-    .toLowerCase();
+  const lastSegment = rawType.split(".").pop(); // pega último trecho
+
+  return lastSegment
+    .replace(/Trigger$/i, "") // remove Trigger
+    .toLowerCase(); // normaliza
 }
 
 // envia dados para o Supabase
