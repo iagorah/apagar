@@ -1,9 +1,9 @@
-console.log("[HOOK FILE] execution-hooks.js loaded at:", new Date().toISOString());
+console.log("[HOOK FILE] execution-hooks.js loaded at:", new Date().toISOString()); // loga carregamento do hook
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+const SUPABASE_URL = process.env.SUPABASE_URL; // URL do Supabase
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY; // chave de serviço do Supabase
 
-const AI_NODE_IDENTIFIERS = [
+const AI_NODE_IDENTIFIERS = [ // lista de prefixes de nodes de IA conhecidos
   "@n8n/n8n-nodes-langchain",
   "n8n-nodes-base.openAi",
   "n8n-nodes-base.anthropic",
@@ -11,11 +11,9 @@ const AI_NODE_IDENTIFIERS = [
   "n8n-nodes-base.awsBedrock"
 ];
 
-const IGNORED_NODE_TYPES = ["n8n-nodes-base.n8n"];
+const IGNORED_NODE_TYPES = ["n8n-nodes-base.n8n"]; // nodes ignorados na detecção de IA
 
-/**
- * Extrai tempo economizado
- */
+// extrai minutos economizados dos metadados dos nodes
 function extractTimeSaved(nodeRuns) {
   let totalMinutes = 0;
 
@@ -31,9 +29,7 @@ function extractTimeSaved(nodeRuns) {
   return totalMinutes;
 }
 
-/**
- * Coleta tokens únicos globalmente
- */
+// coleta blocos únicos de tokens percorrendo recursivamente o objeto
 function collectUniqueTokens(obj, tokenMap) {
   if (!obj || typeof obj !== "object") return;
 
@@ -50,9 +46,8 @@ function collectUniqueTokens(obj, tokenMap) {
     const prompt = Number(tokenBlock.promptTokens || tokenBlock.prompt_tokens || 0);
     const completion = Number(tokenBlock.completionTokens || tokenBlock.completion_tokens || 0);
 
-    // chave única = totalTokens
     if (total > 0 && !tokenMap.has(total)) {
-      tokenMap.set(total, {
+      tokenMap.set(total, { // garante unicidade por totalTokens
         totalTokens: total,
         promptTokens: prompt,
         completionTokens: completion
@@ -62,14 +57,12 @@ function collectUniqueTokens(obj, tokenMap) {
 
   for (const value of Object.values(obj)) {
     if (typeof value === "object") {
-      collectUniqueTokens(value, tokenMap);
+      collectUniqueTokens(value, tokenMap); // recursão
     }
   }
 }
 
-/**
- * Soma tokens únicos
- */
+// soma os tokens únicos coletados
 function sumUniqueTokens(tokenMap) {
   const totals = {
     totalTokens: 0,
@@ -86,9 +79,7 @@ function sumUniqueTokens(tokenMap) {
   return totals;
 }
 
-/**
- * Extrai modelo
- */
+// tenta extrair o modelo de IA recursivamente
 function extractAiModel(obj) {
   if (!obj || typeof obj !== "object") return null;
 
@@ -107,6 +98,20 @@ function extractAiModel(obj) {
   return null;
 }
 
+// extrai o tipo de trigger a partir do triggerNode do n8n
+function extractTriggerType(fullRunData) {
+  const rawType = fullRunData?.triggerNode?.type; // pega tipo bruto do trigger
+
+  if (!rawType) return null;
+
+  return rawType
+    .replace(/^n8n-nodes-base\./, "") // remove prefixo padrão
+    .replace(/Trigger$/, "") // remove sufixo Trigger
+    .replace(/trigger$/, "") // fallback para lowercase
+    .toLowerCase(); // normaliza
+}
+
+// envia dados para o Supabase
 async function logToSupabase(data) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
 
@@ -134,33 +139,32 @@ module.exports = {
   workflow: {
     postExecute: [
       async function (fullRunData, workflowData, executionId) {
-        const resultData = fullRunData?.data?.resultData?.runData || {};
-        const startedAt = fullRunData?.startedAt;
-        const stoppedAt = fullRunData?.stoppedAt;
+        const resultData = fullRunData?.data?.resultData?.runData || {}; // dados de execução por node
+        const startedAt = fullRunData?.startedAt; // início da execução
+        const stoppedAt = fullRunData?.stoppedAt; // fim da execução
 
-        const uniqueTokenMap = new Map();
+        const uniqueTokenMap = new Map(); // mapa de tokens únicos
 
-        let totalMinutesSaved = 0;
-        let aiNodeFound = false;
-        let aiModel = null;
+        let totalMinutesSaved = 0; // acumulador de tempo economizado
+        let aiNodeFound = false; // flag de presença de IA
+        let aiModel = null; // modelo detectado
 
+        // percorre todos os nodes executados
         for (const [nodeName, nodeRuns] of Object.entries(resultData)) {
           const nodeInfo = workflowData?.nodes?.find(n => n.name === nodeName);
           if (!nodeInfo) continue;
 
-          totalMinutesSaved += extractTimeSaved(nodeRuns);
+          totalMinutesSaved += extractTimeSaved(nodeRuns); // soma tempo economizado
 
           const matchesKnownAiNode = AI_NODE_IDENTIFIERS.some(prefix =>
             nodeInfo.type.startsWith(prefix)
           );
 
-          const detectedModel = extractAiModel(nodeRuns);
+          const detectedModel = extractAiModel(nodeRuns); // tenta extrair modelo
 
-          // coleta tokens únicos globalmente
-          collectUniqueTokens(nodeRuns, uniqueTokenMap);
+          collectUniqueTokens(nodeRuns, uniqueTokenMap); // coleta tokens únicos
 
-          const hasAiPayload =
-            detectedModel && uniqueTokenMap.size > 0;
+          const hasAiPayload = detectedModel && uniqueTokenMap.size > 0; // valida payload de IA
 
           const isAiNode =
             (matchesKnownAiNode && !IGNORED_NODE_TYPES.includes(nodeInfo.type)) ||
@@ -170,44 +174,53 @@ module.exports = {
             aiNodeFound = true;
 
             if (!aiModel && detectedModel) {
-              aiModel = detectedModel;
+              aiModel = detectedModel; // salva primeiro modelo encontrado
             }
           }
         }
 
-        // soma final única
-        const tokenStats = sumUniqueTokens(uniqueTokenMap);
+        const tokenStats = sumUniqueTokens(uniqueTokenMap); // soma final de tokens
+
+        const triggerType = extractTriggerType(fullRunData); // extrai tipo do trigger
 
         const logData = {
           execution_id: executionId,
           workflow_id: workflowData?.id,
           workflow_name: workflowData?.name,
-          status: fullRunData?.status || (fullRunData?.finished ? "success" : "error"),
+
+          status: fullRunData?.status || (fullRunData?.finished ? "success" : "error"), // status final
           finished: fullRunData?.finished || false,
+
           started_at: startedAt,
           finished_at: stoppedAt,
+
           duration_ms: startedAt && stoppedAt
             ? new Date(stoppedAt).getTime() - new Date(startedAt).getTime()
-            : null,
-          mode: fullRunData?.mode,
-          node_count: Object.keys(resultData).length,
-          error_message: fullRunData?.data?.resultData?.error?.message || null,
+            : null, // duração total
 
-          has_ai: aiNodeFound,
-          ai_model: aiModel,
+          mode: fullRunData?.mode, // modo de execução (manual, trigger, etc)
+
+          trigger_type: triggerType, // tipo do trigger normalizado
+
+          node_count: Object.keys(resultData).length, // quantidade de nodes executados
+
+          error_message: fullRunData?.data?.resultData?.error?.message || null, // erro se houver
+
+          has_ai: aiNodeFound, // flag de IA
+          ai_model: aiModel, // modelo de IA detectado
 
           total_tokens: tokenStats.totalTokens,
           prompt_tokens: tokenStats.promptTokens,
           completion_tokens: tokenStats.completionTokens,
 
-          minutes_saved: Math.round(totalMinutesSaved)
+          minutes_saved: Math.round(totalMinutesSaved) // tempo economizado arredondado
         };
 
         console.log(
-          `[HOOK] ID ${executionId} | AI: ${aiNodeFound} | Model: ${aiModel} | Unique Token Blocks: ${uniqueTokenMap.size} | Tokens: ${tokenStats.totalTokens}`
-        );
+          `[HOOK] ID ${executionId} | Trigger: ${triggerType} | AI: ${aiNodeFound} | Model: ${aiModel} | Tokens: ${tokenStats.totalTokens}`
+        ); // log resumido
 
-        await logToSupabase(logData);
+        await logToSupabase(logData); // envia pro banco
       }
     ]
   }
