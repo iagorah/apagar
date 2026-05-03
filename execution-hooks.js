@@ -100,15 +100,16 @@ function extractAiModel(obj) {
 
 // extrai o tipo de trigger a partir do triggerNode do n8n
 function extractTriggerType(fullRunData) {
-  const rawType = fullRunData?.triggerNode?.type; // pega tipo bruto do trigger
+  const rawType =
+    fullRunData?.data?.executionData?.runtimeData?.triggerNode?.type;
 
   if (!rawType) return null;
 
   return rawType
-    .replace(/^n8n-nodes-base\./, "") // remove prefixo padrão
-    .replace(/Trigger$/, "") // remove sufixo Trigger
-    .replace(/trigger$/, "") // fallback para lowercase
-    .toLowerCase(); // normaliza
+    .replace(/^n8n-nodes-base\./, "")
+    .replace(/Trigger$/, "")
+    .replace(/trigger$/, "")
+    .toLowerCase();
 }
 
 // envia dados para o Supabase
