@@ -78,9 +78,7 @@ function looksLikeTokenUsage(obj) {
 
   return (
     keys.some(k => /token/i.test(k)) &&
-    keys.some(k =>
-      /(prompt|completion|input|output|total)/i.test(k)
-    )
+    keys.some(k => /(prompt|completion|input|output|total)/i.test(k))
   );
 }
 
@@ -111,7 +109,8 @@ function collectUniqueTokens(obj, tokenMap) {
   }
 
   if (tokenBlock) {
-    const fingerprint = `${tokenBlock.totalTokens}-${tokenBlock.promptTokens}-${tokenBlock.completionTokens}`;
+    const fingerprint =
+      `${tokenBlock.totalTokens}-${tokenBlock.promptTokens}-${tokenBlock.completionTokens}`;
 
     if (!tokenMap.has(fingerprint)) {
       tokenMap.set(fingerprint, tokenBlock);
@@ -142,16 +141,21 @@ function sumUniqueTokens(tokenMap) {
 }
 
 /* ================================
-   MODEL DETECTION
+   MODEL DETECTION (CORRIGIDO)
 ================================ */
 
 function extractAiModel(obj) {
   if (!obj || typeof obj !== "object") return null;
 
-  if (obj.ai_model) return obj.ai_model;
-  if (obj.model) return obj.model;
-  if (obj.model_name) return obj.model_name;
-  if (obj.modelId) return obj.modelId;
+  // n8n Resource Locator
+  if (obj.model?.value && typeof obj.model.value === "string") {
+    return obj.model.value;
+  }
+
+  if (typeof obj.ai_model === "string") return obj.ai_model;
+  if (typeof obj.model === "string") return obj.model;
+  if (typeof obj.model_name === "string") return obj.model_name;
+  if (typeof obj.modelId === "string") return obj.modelId;
 
   for (const value of Object.values(obj)) {
     if (typeof value === "object") {
@@ -226,7 +230,10 @@ module.exports = {
         let aiModel = null;
 
         for (const [nodeName, nodeRuns] of Object.entries(resultData)) {
-          const nodeInfo = workflowData?.nodes?.find(n => n.name === nodeName);
+          const nodeInfo = workflowData?.nodes?.find(
+            n => n.name === nodeName
+          );
+
           if (!nodeInfo) continue;
 
           totalMinutesSaved += extractTimeSaved(nodeRuns);
@@ -239,15 +246,14 @@ module.exports = {
 
           collectUniqueTokens(nodeRuns, uniqueTokenMap);
 
-          const hasAiPayload =
-            detectedModel || uniqueTokenMap.size > 0;
+          const hasRealAiExecution =
+            matchesKnownAiNode &&
+            (detectedModel || uniqueTokenMap.size > 0);
 
-          const isAiNode =
-            (matchesKnownAiNode &&
-              !IGNORED_NODE_TYPES.includes(nodeInfo.type)) ||
-            hasAiPayload;
-
-          if (isAiNode) {
+          if (
+            hasRealAiExecution &&
+            !IGNORED_NODE_TYPES.includes(nodeInfo.type)
+          ) {
             aiNodeFound = true;
 
             if (!aiModel && detectedModel) {
