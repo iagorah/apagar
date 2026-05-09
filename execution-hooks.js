@@ -17,16 +17,44 @@ const IGNORED_NODE_TYPES = ["n8n-nodes-base.n8n"];
    TIME SAVED
 ================================ */
 
-function extractTimeSaved(nodeRuns) {
+function extractDynamicTimeSaved(nodeRuns) {
   let totalMinutes = 0;
 
   if (!Array.isArray(nodeRuns)) return 0;
 
   for (const run of nodeRuns) {
     const minutes = run.metadata?.timeSaved?.minutes;
+
     if (minutes !== undefined) {
       totalMinutes += Number(minutes);
     }
+  }
+
+  return totalMinutes;
+}
+
+function extractTimeSaved(fullRunData, workflowData, resultData) {
+  const workflowSettings = workflowData?.settings || {};
+  const mode = workflowSettings.timeSavedMode;
+
+  // FIXED
+  if (mode === "fixed") {
+    const executionSucceeded =
+      fullRunData?.finished === true &&
+      (fullRunData?.status === "success" || !fullRunData?.status);
+
+    if (executionSucceeded) {
+      return Number(workflowSettings.timeSavedPerExecution || 0);
+    }
+
+    return 0;
+  }
+
+  // DYNAMIC (default)
+  let totalMinutes = 0;
+
+  for (const nodeRuns of Object.values(resultData || {})) {
+    totalMinutes += extractDynamicTimeSaved(nodeRuns);
   }
 
   return totalMinutes;
@@ -98,6 +126,7 @@ function collectUniqueTokens(obj, tokenMap) {
 
   for (const candidate of candidates) {
     const normalized = normalizeTokenBlock(candidate);
+
     if (normalized) {
       tokenBlock = normalized;
       break;
@@ -141,13 +170,12 @@ function sumUniqueTokens(tokenMap) {
 }
 
 /* ================================
-   MODEL DETECTION (CORRIGIDO)
+   MODEL DETECTION
 ================================ */
 
 function extractAiModel(obj) {
   if (!obj || typeof obj !== "object") return null;
 
-  // n8n Resource Locator
   if (obj.model?.value && typeof obj.model.value === "string") {
     return obj.model.value;
   }
@@ -225,7 +253,6 @@ module.exports = {
 
         const uniqueTokenMap = new Map();
 
-        let totalMinutesSaved = 0;
         let aiNodeFound = false;
         let aiModel = null;
 
@@ -235,8 +262,6 @@ module.exports = {
           );
 
           if (!nodeInfo) continue;
-
-          totalMinutesSaved += extractTimeSaved(nodeRuns);
 
           const matchesKnownAiNode = AI_NODE_IDENTIFIERS.some(prefix =>
             nodeInfo.type.startsWith(prefix)
@@ -261,6 +286,12 @@ module.exports = {
             }
           }
         }
+
+        const totalMinutesSaved = extractTimeSaved(
+          fullRunData,
+          workflowData,
+          resultData
+        );
 
         const tokenStats = sumUniqueTokens(uniqueTokenMap);
         const triggerType = extractTriggerType(fullRunData);
@@ -304,7 +335,7 @@ module.exports = {
         };
 
         console.log(
-          `[HOOK] ID ${executionId} | Trigger: ${triggerType} | AI: ${aiNodeFound} | Model: ${aiModel} | Tokens: ${tokenStats.totalTokens}`
+          `[HOOK] ID ${executionId} | Trigger: ${triggerType} | AI: ${aiNodeFound} | Model: ${aiModel} | Tokens: ${tokenStats.totalTokens} | Minutes Saved: ${totalMinutesSaved}`
         );
 
         await logToSupabase(logData);
