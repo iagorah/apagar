@@ -71,17 +71,6 @@ function normalizeTokenBlock(block) {
     };
 }
 
-function looksLikeTokenUsage(obj) {
-    if (!obj || typeof obj !== "object") return false;
-
-    const keys = Object.keys(obj);
-
-    return (
-        keys.some(k => /token/i.test(k)) &&
-        keys.some(k => /(prompt|completion|input|output|total)/i.test(k))
-    );
-}
-
 // Coleta os blocos de token de UMA iteracao (task run). Dedup somente
 // dentro desta iteracao, para evitar contar o mesmo bloco que aparece
 // duplicado em `data` e `metadata` do n8n. Nao dedupa entre iteracoes.
@@ -108,10 +97,6 @@ function collectTokenBlocksInRun(root) {
                 found = normalized;
                 break;
             }
-        }
-
-        if (!found && looksLikeTokenUsage(obj)) {
-            found = normalizeTokenBlock(obj);
         }
 
         if (found) {
@@ -183,6 +168,42 @@ function extractProvider(nodeType) {
     return null;
 }
 
+function extractProviderFromPayload(obj) {
+    if (!obj || typeof obj !== "object") return null;
+    if (typeof obj.provider === "string") return obj.provider;
+    if (typeof obj.ai_provider === "string") return obj.ai_provider;
+
+    for (const value of Object.values(obj)) {
+        if (typeof value === "object") {
+            const found = extractProviderFromPayload(value);
+            if (found) return found;
+        }
+    }
+
+    return null;
+}
+
+/* ================================
+   OPT-IN VIA NOTES (@track-usage)
+================================ */
+
+// Opt-in para nodes que produzem consumo de IA fora dos providers nativos
+// (ex.: HTTP Request chamando uma API externa). Marcar com "@track-usage"
+// no campo notes do node. Suporta overrides opcionais:
+//   @track-usage provider=google model=gemini-2.5-flash-preview-tts
+function parseTrackUsageNotes(notes) {
+    if (typeof notes !== "string" || !notes.includes("@track-usage")) {
+        return { enabled: false };
+    }
+
+    const result = { enabled: true };
+    const providerMatch = notes.match(/provider=([\w-]+)/i);
+    const modelMatch = notes.match(/model=([\w.\-:/]+)/i);
+    if (providerMatch) result.provider = providerMatch[1];
+    if (modelMatch) result.model = modelMatch[1];
+    return result;
+}
+
 /* ================================
    TRIGGER
 ================================ */
@@ -214,11 +235,13 @@ function buildTokenUsageRows(executionId, workflowId, resultData, workflowData, 
         const matchesKnownAiNode = AI_NODE_IDENTIFIERS.some(prefix =>
             nodeInfo.type.startsWith(prefix)
         );
-        if (!matchesKnownAiNode) continue;
+        const trackOverride = parseTrackUsageNotes(nodeInfo.notes);
+
+        if (!matchesKnownAiNode && !trackOverride.enabled) continue;
         if (IGNORED_NODE_TYPES.includes(nodeInfo.type)) continue;
         if (!Array.isArray(nodeRuns)) continue;
 
-        const provider = extractProvider(nodeInfo.type);
+        const providerFromType = extractProvider(nodeInfo.type);
 
         for (const run of nodeRuns) {
             const blocks = collectTokenBlocksInRun(run);
@@ -231,7 +254,15 @@ function buildTokenUsageRows(executionId, workflowId, resultData, workflowData, 
                     block.completionTokens <= 0
                 ) continue;
 
-                const model = extractAiModel(run) || "unknown";
+                const model =
+                    trackOverride.model ||
+                    extractAiModel(run) ||
+                    "unknown";
+
+                const provider =
+                    trackOverride.provider ||
+                    providerFromType ||
+                    extractProviderFromPayload(run);
 
                 rows.push({
                     execution_id: executionId,
