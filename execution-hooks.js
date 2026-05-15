@@ -32,6 +32,25 @@ function extractTimeSaved(nodeRuns) {
     return totalMinutes;
 }
 
+// Escolhe entre os dois modos exclusivos de tempo economizado:
+//   - "fixed":   usa workflowData.settings.timeSavedPerExecution (so em success)
+//   - "dynamic": (default) soma metadata.timeSaved.minutes de cada node run
+function computeTimeSaved(workflowData, resultData, status) {
+    const mode = workflowData?.settings?.timeSavedMode;
+
+    if (mode === "fixed") {
+        if (status !== "success") return 0;
+        const perExecution = Number(workflowData?.settings?.timeSavedPerExecution);
+        return Number.isFinite(perExecution) && perExecution > 0 ? perExecution : 0;
+    }
+
+    let total = 0;
+    for (const nodeRuns of Object.values(resultData)) {
+        total += extractTimeSaved(nodeRuns);
+    }
+    return total;
+}
+
 /* ================================
    TOKEN DETECTION
 ================================ */
@@ -328,10 +347,11 @@ module.exports = {
                 // compartilham o mesmo created_at para garantir alinhamento temporal.
                 const createdAt = new Date().toISOString();
 
-                let totalMinutesSaved = 0;
-                for (const nodeRuns of Object.values(resultData)) {
-                    totalMinutesSaved += extractTimeSaved(nodeRuns);
-                }
+                const status =
+                    fullRunData?.status ||
+                    (fullRunData?.finished ? "success" : "error");
+
+                const totalMinutesSaved = computeTimeSaved(workflowData, resultData, status);
 
                 const triggerType = extractTriggerType(fullRunData);
                 const workflowId = workflowData?.id;
@@ -349,9 +369,7 @@ module.exports = {
                     workflow_id: workflowId,
                     workflow_name: workflowData?.name,
 
-                    status:
-                        fullRunData?.status ||
-                        (fullRunData?.finished ? "success" : "error"),
+                    status,
 
                     finished: fullRunData?.finished || false,
 
